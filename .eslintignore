@@ -1,0 +1,6 @@
+my-react-app/
+backend/
+data_ingestion_validation_backend/
+node_modules/
+build/
+dist/
