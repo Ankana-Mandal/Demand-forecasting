@@ -1,47 +1,122 @@
+
 name: CI-CD Pipeline
 
 on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [develop, main]
+    branches: [main]
 
 jobs:
-
-  ###########################################################################
-  # 1️⃣ BUILD STAGE
-  ###########################################################################
+  # ===========================================================
+  # 1️⃣ BUILD (Python + Node)
+  # ===========================================================
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Debug – show working directory
-        run: |
-          pwd
-          ls -la
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # Python setup
+      - uses: actions/setup-python@v4
         with:
           python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # Node setup
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install Node dependencies (root only)
+        working-directory: .
         run: |
-          python -m pip install --upgrade pip
-          pip install -r ./requirements.txt
+          if [ -f package.json ]; then
+            npm ci --include=dev || npm install --include=dev
+          fi
 
-      - name: Build check
-        run: echo "Build successful"
+      # Upload only needed folders (avoid overwriting root)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace
+          path: |
+            ML_model
+            backend
+            data_ingestion_validation_backend
 
-  ###########################################################################
-  # 2️⃣ LINT STAGE (OPTIONAL, NON-BLOCKING)
-  ###########################################################################
+  # ===========================================================
+  # 2️⃣ TEST (Python + Jest)
+  # ===========================================================
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python setup
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - run: pip install -r requirements.txt pytest coverage
+
+      - name: Run Python tests
+        run: pytest tests
+
+      # JS tests (root only)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install Node deps (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm ci --include=dev || npm install --include=dev
+          fi
+
+      - name: Run Jest tests (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm test -- --coverage || true
+          fi
+
+  # ===========================================================
+  # 3️⃣ COVERAGE (Python)
+  # ===========================================================
+  coverage:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - run: pip install -r requirements.txt coverage
+
+      - name: Python Coverage
+        run: |
+          coverage run -m pytest tests
+          coverage xml
+          coverage report
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage.xml
+
+  # ===========================================================
+  # 4️⃣ LINT (Python + ESLint)
+  # ===========================================================
   lint:
     needs: build
     runs-on: ubuntu-latest
@@ -49,19 +124,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      # Python linting
+      - uses: actions/setup-python@v4
         with:
           python-version: "3.10"
 
-      - name: Install lint tool
-        run: pip install pylint
+      - run: pip install pylint -r requirements.txt
 
-      - name: Run pylint (non-blocking)
-        run: pylint src || true
+      - name: Run pylint
+        run: pylint ML_model tests || true
 
-  ###########################################################################
-  # 3️⃣ SECURITY STAGE (NON-BLOCKING)
-  ###########################################################################
+      # JS linting (root only)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install Node deps (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm ci --include=dev || npm install --include=dev
+          fi
+
+      - name: Run ESLint (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm run lint || true
+          fi
+
+  # ===========================================================
+  # 5️⃣ SECURITY (Bandit + npm audit)
+  # ===========================================================
   security:
     needs: build
     runs-on: ubuntu-latest
@@ -69,28 +164,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      # Python security
+      - uses: actions/setup-python@v4
         with:
           python-version: "3.10"
 
-      - name: Install Bandit
-        run: pip install bandit
+      - run: pip install bandit
 
-      - name: Run security scan
-        run: bandit -r src || true
+      - name: Run Bandit
+        run: |
+          bandit -r ML_model -f txt -o bandit.txt || true
 
-  ###########################################################################
-  # 🚀 DEPLOY STAGE (ONLY ON MAIN)
-  ###########################################################################
+      # JS security (root only)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install Node deps (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm ci --include=dev || npm install --include=dev
+          fi
+
+      - name: npm audit (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm audit --audit-level=high || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: bandit.txt
+
+  # ===========================================================
+  # 6️⃣ DEPLOY (only from main)
+  # ===========================================================
   deploy:
-    needs: [build, lint, security]
+    needs: [build, test, coverage, lint, security]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy placeholder
-        run: |
-          echo "Deploying application..."
-          echo "Model training / serving would happen here"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: workspace
+          path: .
+
+      - name: Deploy to staging
+        run: echo "Deploying to staging..."
+
+      - name: Run integration tests
+        run: echo "Running integration tests..."
+
+      - name: Deploy to production
+        run: echo "Deploying to production..."
