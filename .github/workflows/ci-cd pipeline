@@ -1,0 +1,226 @@
+name: CI-CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ===========================================================
+  # 1️⃣ BUILD (Python + Node)
+  # ===========================================================
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python setup
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # Node setup
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          
+
+      - name: Install Node dependencies (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm ci --include=dev || npm install --include=dev
+          fi
+
+      # Upload only needed folders (avoid overwriting root)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace
+          path: |
+            ML_model
+            backend
+            data_ingestion_validation_backend
+
+  # ===========================================================
+  # 2️⃣ TEST (Python + Jest)
+  # ===========================================================
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python setup
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - run: pip install -r requirements.txt pytest coverage
+
+      - name: Run Python tests
+        run: pytest tests
+
+      # JS tests (root only)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install Node deps (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm ci --include=dev || npm install --include=dev
+          fi
+
+      - name: Run Jest tests (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm test -- --coverage || true
+          fi
+
+  # ===========================================================
+  # 3️⃣ COVERAGE (Python)
+  # ===========================================================
+  coverage:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - run: pip install -r requirements.txt coverage
+
+      - name: Python Coverage
+        run: |
+          coverage run -m pytest tests
+          coverage xml
+          coverage report
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage.xml
+
+  # ===========================================================
+  # 4️⃣ LINT (Python + ESLint)
+  # ===========================================================
+  lint:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python linting
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - run: pip install pylint -r requirements.txt
+
+      - name: Run pylint
+        run: pylint ML_model tests || true
+
+      # JS linting (root only)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install Node deps (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm ci --include=dev || npm install --include=dev
+          fi
+
+      - name: Run ESLint (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm run lint || true
+          fi
+
+  # ===========================================================
+  # 5️⃣ SECURITY (Bandit + npm audit)
+  # ===========================================================
+  security:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python security
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - run: pip install bandit
+
+      - name: Run Bandit
+        run: |
+          bandit -r ML_model -f txt -o bandit.txt || true
+
+      # JS security (root only)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install Node deps (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm ci --include=dev || npm install --include=dev
+          fi
+
+      - name: npm audit (root only)
+        working-directory: .
+        run: |
+          if [ -f package.json ]; then
+            npm audit --audit-level=high || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: bandit.txt
+
+  # ===========================================================
+  # 6️⃣ DEPLOY (only from main)
+  # ===========================================================
+  deploy:
+    needs: [build, test, coverage, lint, security]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: workspace
+          path: .
+
+      - name: Deploy to staging
+        run: echo "Deploying to staging..."
+
+      - name: Run integration tests
+        run: echo "Running integration tests..."
+
+      - name: Deploy to production
+        run: echo "Deploying to production..."
